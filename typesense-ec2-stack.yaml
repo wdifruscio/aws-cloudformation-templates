@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Deploy typesense on EC2 with EBS"
+
+Resources:
+  InternalAppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "SG for typesense instance"
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: "InternalApp-SG"
+
+  TypesenseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow access to Typesense only from other applications in same VPC"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8108
+          ToPort: 8108
+          SourceSecurityGroupId: !Ref InternalAppSecurityGroup
+          # SSH, refine IP blocks if public
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: "Typesense-SG"
+
+  TypesenseInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t4g.micro
+      ImageId: !Ref LatestAmiId
+      KeyName: !Ref KeyPairName
+      NetworkInterfaces:
+        - DeviceIndex: 0 
+          SubnetId: !Ref PrivateSubnet
+          GroupSet:
+            - !Ref TypesenseSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"  # Root volume
+          Ebs:
+            VolumeSize: 20  # Increase root volume to 20GB
+            VolumeType: gp3
+            DeleteOnTermination: true
+        - DeviceName: "/dev/xvdb"  # Additional EBS volume for Typesense data
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            DeleteOnTermination: false  # Persistent storage
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          TypesenseApiKey="${TypesenseApiKey}"
+          sudo yum update -y
+          sudo yum install -y docker
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          sudo usermod -aG docker ec2-user
+
+          # Format and mount additional EBS volume
+          sudo mkfs -t xfs /dev/xvdb
+          sudo mkdir -p /data
+          sudo mount /dev/xvdb /data
+          echo "/dev/xvdb /data xfs defaults 0 0" | sudo tee -a /etc/fstab
+
+          docker run -d \
+            -p 8108:8108 \
+            -v /data:/data \
+            typesense/typesense:27.1 \
+            --api-key="$TypesenseApiKey" \
+            --data-dir /data
+
+Parameters:
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: "Select the existing VPC"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet::Id
+    Description: "Select an existing private subnet"
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "Select an existing EC2 Key Pair"
+
+  LatestAmiId:
+    Type: String
+    Default: ami-03a302aaca4279cf6
+    Description: "Amazon Linux 2023 ARM AMI for T4g instances"
+
+  TypesenseApiKey:
+    Type: String
+    NoEcho: true  # Hides the API key from CloudFormation logs
+    Description: "API Key for Typesense"
+
+Outputs:
+  TypesensePrivateIP:
+    Description: "Private IP of the Typesense EC2 instance"
+    Value: !GetAtt TypesenseInstance.PrivateIp
